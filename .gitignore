@@ -1,0 +1,43 @@
+# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Vim temporary files
+*.swp
+*.swo
+
+# Other common files and directories to ignore
+*.log
+*.tmp
+*.bak
+*.db
+*.sqlite3
+*.sqlite
+*.pid
+*.lock
+*.retry
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Virtual environment and IDE-related files
+venv/
+venv.bak/
+*.pyc
+.vscode/
+.idea/
+*.iml
+*.iws
+*.ipr
+*.bak
+*.swp
+*.swo
+
