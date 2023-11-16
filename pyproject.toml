@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[project]
+name = "assistants_itl"
+version = "0.0.1"
+authors = [
+  { name="That Dev", email="sunny@thatone.ai" },
+]
+description = ""
+readme = "README.md"
+requires-python = ">=3.7"
+dependencies = [
+    "pyyaml",
+    "openai",
+    "transformers",
+    "itllib@git+https://github.com/ThatOneAI/itllib",
+    "itlmon@git+https://github.com/ThatOneAI/itlmon"
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+]
+
