@@ -20,7 +20,7 @@ CLUSTER = "assistants"
 
 itl = Itl()
 itl.apply_config(CONFIG_PATH, SECRETS_PATH)
-itl.start_thread()
+itl.start()
 
 metatools = MetaToolSet(itl, CLUSTER)
 
@@ -222,7 +222,7 @@ async def load_existing():
             assistants[name].configure(config["spec"])
             print("Loaded", f"HFAssistant/{name}")
         except Exception as e:
-            print("Failed to load HFAssistant", name, e)
+            print("Failed to load HFAssistant", name, e, traceback.format_exc())
 
 
 async def load_metatool(metatool: Metatool):
