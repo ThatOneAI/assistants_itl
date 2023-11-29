@@ -1,6 +1,5 @@
 import os
-from itllib import Itl
-from .resources import ResourceSet
+from itllib import Itl, SyncedResources
 
 CLUSTER = "assistants"
 CONFIG_PATH = os.path.join("config.yaml")
@@ -10,7 +9,7 @@ itl = Itl()
 itl.apply_config(CONFIG_PATH, SECRETS_PATH)
 itl.start()
 
-tools = ResourceSet()
-prompts = ResourceSet()
-tasklogs = ResourceSet()
-assistants = ResourceSet()
+tools = SyncedResources()
+prompts = SyncedResources()
+tasklogs = SyncedResources()
+assistants = SyncedResources()

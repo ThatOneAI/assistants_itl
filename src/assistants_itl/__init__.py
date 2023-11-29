@@ -3,15 +3,12 @@ import asyncio
 from contextlib import contextmanager
 import re
 from string import Template
-import traceback
 import openai
 from pydantic import BaseModel
 import requests
 
-from transformers.tools import OpenAiAgent
-from itllib import Itl, ResourceController
+from itllib import ResourceController
 
-from .resources import ResourceController, ResourceSet, _check_config
 from .hfa_module import HFAssistantConfig, HFAssistant
 from .globals import *
 
@@ -19,15 +16,12 @@ from .globals import *
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", None)
 
 
-# Set up the controllers
-
-
-@prompts.register(itl, CLUSTER, "assistants.thatone.ai/v1", "Prompt")
+@prompts.register(itl, CLUSTER, "assistants.thatone.ai", "v1", "Prompt")
 class Prompt(BaseModel):
     prompt: str
 
 
-@tasklogs.register(itl, CLUSTER, "assistants.thatone.ai/v1", "TaskLog")
+@tasklogs.register(itl, CLUSTER, "assistants.thatone.ai", "v1", "TaskLog")
 class TaskLog(BaseModel):
     prompt: str
     tools: dict[str, str] = {}
@@ -35,7 +29,7 @@ class TaskLog(BaseModel):
     code: str
 
 
-@assistants.register(itl, CLUSTER, "assistants.thatone.ai/v1", "HFAssistant")
+@assistants.register(itl, CLUSTER, "assistants.thatone.ai", "v1", "HFAssistant")
 class HFAController(ResourceController):
     def create_resource(self, config):
         if "spec" not in config:
@@ -52,7 +46,7 @@ class HFAController(ResourceController):
         return super().delete_resource(resource)
 
 
-@tools.register(itl, CLUSTER, "tools.thatone.ai/v1", "SendTool")
+@tools.register(itl, CLUSTER, "tools.thatone.ai", "v1", "SendTool")
 class SendTool(BaseModel):
     description: str
     sendUrl: str
@@ -97,7 +91,7 @@ class SendTool(BaseModel):
             asyncio.create_task(itl.stream_send(self.sendUrl, message))
 
 
-@tools.register(itl, CLUSTER, "tools.thatone.ai/v1", "RestApiTool")
+@tools.register(itl, CLUSTER, "tools.thatone.ai", "v1", "RestApiTool")
 class RestApiTool(BaseModel):
     description: str
     method: str
@@ -163,7 +157,7 @@ class RestApiTool(BaseModel):
         return response.text
 
 
-@tools.register(itl, CLUSTER, "tools.thatone.ai/v1", "ChatGptTool")
+@tools.register(itl, CLUSTER, "tools.thatone.ai", "v1", "ChatGptTool")
 class ChatGptTool(BaseModel):
     description: str
     model: str

@@ -1,15 +1,10 @@
-import asyncio
-from collections import defaultdict
 from contextlib import contextmanager
-from datetime import datetime, timedelta
 import os
-import json
 from pydantic import BaseModel
 
-from transformers.tools import Agent, Tool, OpenAiAgent
+from transformers.tools import Tool, OpenAiAgent
 from itllib import Itl
 
-from .resources import ResourceController
 from .globals import *
 
 
@@ -40,9 +35,9 @@ class HFAssistant:
         self.examples = config.examples
 
         self.agent = _create_agent(config.codeModel)
-        self.available_tools = tools.resources
-        self.available_prompts = prompts.resources
-        self.available_examples = tasklogs.resources
+        self.available_tools = tools
+        self.available_prompts = prompts
+        self.available_examples = tasklogs
 
         itl.ondata(self.stream)(self._handle_messages)
 
