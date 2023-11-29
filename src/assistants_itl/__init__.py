@@ -1,236 +1,199 @@
 import os
 import asyncio
 from contextlib import contextmanager
+import re
+from string import Template
 import traceback
+import openai
+from pydantic import BaseModel
+import requests
 
 from transformers.tools import OpenAiAgent
 from itllib import Itl, ResourceController
 
-from .metatools import Metatool, MetaToolSet, _check_config
-from .metatools.stringutils import StringMetatool
-from .metatools.api import RestApiMetatool
-from .metatools.llm import LanguageMetatool
-from .metatools.constants import TemplateMetatool
-from .hfassistant_module import HFMetaAssistantModule
+from .resources import ResourceController, ResourceSet, _check_config
+from .hfa_module import HFAssistantConfig, HFAssistant
+from .globals import *
 
 
-CONFIG_PATH = os.path.join("config.yaml")
-SECRETS_PATH = "./secrets"
-CLUSTER = "assistants"
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", None)
 
-itl = Itl()
-itl.apply_config(CONFIG_PATH, SECRETS_PATH)
-itl.start()
-
-metatools = MetaToolSet(itl, CLUSTER)
-
-prompts = {}
-tasklogs = {}
-tools = metatools.tools  # MetaToolSet will manage this
-assistants = {}
 
 # Set up the controllers
 
 
-@itl.controller(CLUSTER, "assistants.thatone.ai", "v1", "Prompt")
-async def prompt_controller(pending: ResourceController):
-    async for op in pending:
-        print("Prompt update:", pending.name)
-        config = await op.new_config()
-        if config == None:
-            # Delete the prompt
-            if pending.name in prompts:
-                del prompts[pending.name]
-            await op.accept()
-            print("Deleted", f"Prompt/{pending.name}")
-            continue
-
-        if "prompt" not in config:
-            print("Skipping prompt", pending.name, "because prompt is not in config")
-            await op.reject()
-            continue
-
-        prompts[pending.name] = config["prompt"]
-        await op.accept()
-        print("Loaded", f"Prompt/{pending.name}")
+@prompts.register(itl, CLUSTER, "assistants.thatone.ai/v1", "Prompt")
+class Prompt(BaseModel):
+    prompt: str
 
 
-@itl.controller(CLUSTER, "assistants.thatone.ai", "v1", "TaskLog")
-async def tasklog_controller(pending: ResourceController):
-    async for op in pending:
-        print("Tasklog update:", pending.name)
-        config = await op.new_config()
-        if config == None:
-            # Delete the prompt
-            if pending.name in tasklogs:
-                del tasklogs[pending.name]
-            await op.accept()
-            print("Deleted", f"TaskLog/{pending.name}")
-            continue
+@tasklogs.register(itl, CLUSTER, "assistants.thatone.ai/v1", "TaskLog")
+class TaskLog(BaseModel):
+    prompt: str
+    tools: dict[str, str] = {}
+    steps: str = ""
+    code: str
 
+
+@assistants.register(itl, CLUSTER, "assistants.thatone.ai/v1", "HFAssistant")
+class HFAController(ResourceController):
+    def create_resource(self, config):
         if "spec" not in config:
-            print("Skipping TaskLog", pending.name, "because spec is not in config")
-            await op.reject()
-            continue
+            raise ValueError("Config is missing required key: spec")
+        return HFAssistant(HFAssistantConfig(**config["spec"]))
 
-        spec = config["spec"]
-        required_keys = {"prompt", "tools", "steps", "code"}
-        optional_keys = set()
-        try:
-            _check_config(spec, required_keys, optional_keys)
-        except ValueError as e:
-            print("Error in", f"TaskLog/{pending.name}", e)
-            await op.reject()
-            continue
-
-        if not isinstance(config["spec"]["tools"], dict):
-            print("Skipping TaskLog", pending.name, "because tools is not a dict")
-            await op.reject()
-            continue
-
-        # Set the prompt
-        tasklogs[pending.name] = config["spec"]
-        await op.accept()
-        print("Loaded", f"TaskLog/{pending.name}")
-
-
-@itl.controller(CLUSTER, "assistants.thatone.ai", "v1", "HFAssistant")
-async def hfassistant_controller(pending: ResourceController):
-    async for op in pending:
-        print("assistant update:", pending.name)
-        config = await op.new_config()
-        if config == None:
-            # Delete the assistant
-            if pending.name in assistants:
-                del assistants[pending.name]
-            await op.accept()
-            print("Deleted", f"HFAssistant/{pending.name}")
-            continue
-
+    def update_resource(self, resource: HFAssistant, config):
         if "spec" not in config:
-            await op.reject()
-            print("Skipping HFAssistant", pending.name, "because spec is not in config")
-            continue
-        spec = config["spec"]
+            raise ValueError("Config is missing required key: spec")
+        resource.configure(HFAssistantConfig(**config["spec"]))
 
-        if "stream" not in spec:
-            await op.reject()
-            print("Skipping HFAssistant", pending.name, "because stream is not in spec")
-            continue
-        stream = spec["stream"]
+    def delete_resource(self, resource):
+        print("You'll need to restart the script to complete deletion of an assistant")
+        return super().delete_resource(resource)
 
-        if await op.old_config() == None:
-            # Create the assistant
-            assistants[pending.name] = HFMetaAssistantModule(
-                itl,
-                CLUSTER,
-                stream,
-                _create_agent(),
-                prompts,
-                tasklogs,
-                tools,
+
+@tools.register(itl, CLUSTER, "tools.thatone.ai/v1", "SendTool")
+class SendTool(BaseModel):
+    description: str
+    sendUrl: str
+    format: str = None
+    join: str = None
+    print: bool = False
+    synchronous: bool = False
+
+    def __call__(self, *args, **kwargs):
+        global itl
+
+        if args and kwargs:
+            raise ValueError(
+                "SendTool can only be called with args or kwargs, not both"
             )
 
-        try:
-            assistants[pending.name].configure(spec)
-        except ValueError as e:
-            print("Error in", f"HFAssistant/{pending.name}", e)
-            await op.reject()
-            continue
+        if self.format:
+            if args:
+                raise ValueError("SendTool with 'format' must use kwargs")
 
-        await op.accept()
-        print("Loaded", f"HFAssistant/{pending.name}")
+            if isinstance(self.format, str):
+                message = Template(self.format).substitute(**kwargs)
+            elif isinstance(self.format, dict):
+                message = {
+                    k: Template(v).substitute(**kwargs) for k, v in self.format.items()
+                }
+            elif isinstance(self.format, list):
+                message = [Template(v).substitute(**kwargs) for v in self.format]
+        elif self.join:
+            if kwargs:
+                raise ValueError("SendTool with 'join' must use args, not kwargs")
+            message = self.join.join(str(x) for x in args)
+        else:
+            message = args or kwargs
+
+        if self.print:
+            print(message)
+
+        if self.synchronous:
+            itl.stream_send_sync(self.sendUrl, message)
+        else:
+            asyncio.create_task(itl.stream_send(self.sendUrl, message))
 
 
-@contextmanager
-def _no_fetch():
-    from transformers.tools import agents
+@tools.register(itl, CLUSTER, "tools.thatone.ai/v1", "RestApiTool")
+class RestApiTool(BaseModel):
+    description: str
+    method: str
+    url: str
+    headers: dict = {}
+    params: dict = {}
+    data: str = None
+    backoff: float = None
+    attempts: int = None
 
-    orig_fn = agents.download_prompt
-    try:
-        agents.download_prompt = lambda *args, **kwargs: ""
-        yield
-    finally:
-        agents.download_prompt = orig_fn
+    def __call__(self, **kwargs):
+        method = Template(self.method).substitute(kwargs)
+        url = Template(self.url).substitute(kwargs)
+
+        if self.headers:
+            headers = {}
+            for key, value in self.headers.items():
+                if isinstance(key, str):
+                    key = Template(key).substitute(kwargs)
+                if isinstance(value, str):
+                    value = Template(value).substitute(kwargs)
+                headers[key] = value
+        else:
+            headers = None
+
+        if self.params:
+            params = {}
+            for key, value in self.params.items():
+                if isinstance(key, str):
+                    key = Template(key).substitute(kwargs)
+                if isinstance(value, str):
+                    value = Template(value).substitute(kwargs)
+                params[key] = value
+        else:
+            params = None
+
+        if isinstance(self.data, str):
+            string_data = Template(self.data).substitute(kwargs)
+            json_data = None
+        elif isinstance(self.data, dict):
+            string_data = None
+            json_data = {}
+            for key, value in self.data.items():
+                if isinstance(key, str):
+                    key = Template(key).substitute(kwargs)
+                if isinstance(value, str):
+                    value = Template(value).substitute(kwargs)
+                json_data[key] = value
+        else:
+            string_data = None
+            json_data = None
+
+        response = requests.request(
+            method,
+            url,
+            headers=headers,
+            params=params,
+            data=string_data,
+            json=json_data,
+            stream=True,
+        )
+
+        return response.text
 
 
-def _create_agent():
-    openai_api_key = os.environ.get("OPENAI_API_KEY", None)
+@tools.register(itl, CLUSTER, "tools.thatone.ai/v1", "ChatGptTool")
+class ChatGptTool(BaseModel):
+    description: str
+    model: str
+    calls: list[dict]
 
-    with _no_fetch():
-        result = OpenAiAgent(model="gpt-3.5-turbo", api_key=openai_api_key)
-        result.toolbox.clear()
+    def __call__(self, **kwargs):
+        params = {"result": None}
+        params.update(kwargs)
+
+        for call in self.calls:
+            user_prompt = Template(call["userPrompt"]).substitute(params)
+            system_prompt = Template(call["systemPrompt"]).substitute(params)
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+
+            client = openai.OpenAI(api_key=OPENAI_API_KEY)
+            result = (
+                client.chat.completions.create(model=self.model, messages=messages)
+                .choices[0]
+                .message.content
+            )
+
+            if "retain" in call:
+                match_result = re.match(call["retain"], result)
+                if match_result:
+                    result = match_result.group(1)
+
+            params["result"] = result
+
         return result
-
-
-# Load the existing prompts, tasks, tools, and assistants
-
-
-async def load_existing():
-    retrieved_prompts = (
-        await itl.resource_read_all(CLUSTER, "assistants.thatone.ai", "v1", "Prompt")
-        or []
-    )
-    for data in retrieved_prompts:
-        try:
-            config = data["config"]
-            name = data["name"]
-            prompts[name] = config["prompt"]
-        except KeyError:
-            print("Failed to load prompt", name)
-
-    retrieved_tasklogs = (
-        await itl.resource_read_all(CLUSTER, "assistants.thatone.ai", "v1", "TaskLog")
-        or []
-    )
-    for data in retrieved_tasklogs:
-        try:
-            config = data["config"]
-            name = data["name"]
-
-            if not isinstance(config["spec"]["tools"], dict):
-                print("Skipping tasklog", name, "because tools is not a dict")
-                continue
-
-            tasklogs[name] = config["spec"]
-            print("Loaded", f"TaskLog/{name}")
-        except KeyError as e:
-            print("Failed to load TaskLog", name, e)
-
-    await load_metatool(StringMetatool(itl, CLUSTER))
-    await load_metatool(RestApiMetatool(itl, CLUSTER))
-    await load_metatool(LanguageMetatool(itl, CLUSTER))
-    await load_metatool(TemplateMetatool(itl, CLUSTER))
-
-    modules = await itl.resource_read_all(
-        CLUSTER, "assistants.thatone.ai", "v1", "HFAssistant"
-    )
-    for data in modules:
-        try:
-            config = data["config"]
-            spec = config["spec"]
-            name = data["name"]
-            assistants[name] = HFMetaAssistantModule(
-                itl,
-                CLUSTER,
-                spec["stream"],
-                _create_agent(),
-                prompts,
-                tasklogs,
-                tools,
-            )
-            assistants[name].configure(config["spec"])
-            print("Loaded", f"HFAssistant/{name}")
-        except Exception as e:
-            print("Failed to load HFAssistant", name, e, traceback.format_exc())
-
-
-async def load_metatool(metatool: Metatool):
-    metatools.add_metatool(metatool)
-    try:
-        await metatool.load_existing()
-    except Exception as e:
-        print("Failed to load metatool", metatool, e)
-
-
-asyncio.run(load_existing())
