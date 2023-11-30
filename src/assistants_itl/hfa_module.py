@@ -1,11 +1,24 @@
 from contextlib import contextmanager
 import os
+from typing import Generator
 from pydantic import BaseModel
+import random
+from uuid import uuid1
+from time import time
 
-from transformers.tools import Tool, OpenAiAgent
-from itllib import Itl
+from transformers.tools import Tool, OpenAiAgent, agents
+from itllib import Itl, ResourceController
 
 from .globals import *
+
+NODE_ID = f"{int(time()*1000)}-{random.randint(0, 1000000000000)}"
+SEQUENCE = 0
+
+
+def _create_task_id():
+    global NODE_ID, SEQUENCE
+    SEQUENCE += 1
+    return f"tasklog-{NODE_ID}-{SEQUENCE}"
 
 
 class ToolWrapper(Tool):
@@ -23,6 +36,14 @@ class HFAssistantConfig(BaseModel):
     mission: str
     tools: dict[str, str]
     examples: list[str]
+
+
+@tasklogs.register(itl, CLUSTER, "assistants.thatone.ai", "v1", "TaskLog")
+class TaskLog(BaseModel):
+    prompt: str
+    tools: dict[str, str] = {}
+    steps: str = ""
+    code: str
 
 
 class HFAssistant:
@@ -64,10 +85,19 @@ class HFAssistant:
         self.agent.chat_history = self._assemble_prompt(tools)
 
         print("=== Result ===")
-        result = self.agent.chat(message)
-        print(result)
+        with _save_response() as response:
+            result = self.agent.chat(message)
 
-        return result
+        code = response.code
+        explanation = response.explanation
+
+        print("explanation:", explanation)
+        print("code:", code)
+        print("result:", result)
+
+        tasklog = TaskLog(prompt=message, tools=tools, steps=explanation, code=code)
+
+        return result, tasklog
 
     def _assemble_tool_description(self, tools):
         tool_lines = []
@@ -140,20 +170,55 @@ class HFAssistant:
             return
 
         if mode == "run":
-            self.run(message)
+            result, tasklog = self.run(message)
         elif mode == "chat":
-            self.chat(message)
+            result, tasklog = self.chat(message)
         else:
             print(f"Invalid mode: {mode}. Expected 'chat' or 'run'")
             return
 
+        tasklog_config = {
+            "apiVersion": "assistants.thatone.ai/v1",
+            "kind": "TaskLog",
+            "metadata": {"name": _create_task_id()},
+            "spec": tasklog.model_dump(),
+        }
+
+        # Push the log to the cluster
+        await itl.resource_create(CLUSTER, tasklog_config, attach_prefix=True)
+
+        # Add the log to the list of known tasklogs
+        tasklog_name = itl.attach_cluster_prefix(
+            CLUSTER, tasklog_config["metadata"]["name"]
+        )
+        tasklog_id = f"assistants.thatone.ai/v1/TaskLog/{tasklog_name}"
+        tasklogs[tasklog_id] = tasklog
+
+        # Add the log to the history
+        self.examples.append(tasklog_id)
+
         print("Done processing message")
+
+
+@assistants.register(itl, CLUSTER, "assistants.thatone.ai", "v1", "HFAssistant")
+class HFAController(ResourceController):
+    def create_resource(self, config):
+        if "spec" not in config:
+            raise ValueError("Config is missing required key: spec")
+        return HFAssistant(HFAssistantConfig(**config["spec"]))
+
+    def update_resource(self, resource: HFAssistant, config):
+        if "spec" not in config:
+            raise ValueError("Config is missing required key: spec")
+        resource.configure(HFAssistantConfig(**config["spec"]))
+
+    def delete_resource(self, resource):
+        print("You'll need to restart the script to complete deletion of an assistant")
+        return super().delete_resource(resource)
 
 
 @contextmanager
 def _no_fetch():
-    from transformers.tools import agents
-
     orig_fn = agents.download_prompt
     try:
         agents.download_prompt = lambda *args, **kwargs: ""
@@ -169,3 +234,27 @@ def _create_agent(code_model):
         result = OpenAiAgent(model=code_model, api_key=openai_api_key)
         result.toolbox.clear()
         return result
+
+
+class _HFAgentResponse:
+    explanation: str
+    code: str
+
+
+@contextmanager
+def _save_response() -> Generator[_HFAgentResponse, None, None]:
+    orig_fn = agents.clean_code_for_chat
+    result = _HFAgentResponse()
+
+    def _hijack_clean_code_for_chat(*args, **kwargs):
+        nonlocal result
+        explanation, code = orig_fn(*args, **kwargs)
+        result.explanation = explanation or ""
+        result.code = code or ""
+        return result.explanation, result.code
+
+    try:
+        agents.clean_code_for_chat = _hijack_clean_code_for_chat
+        yield result
+    finally:
+        agents.clean_code_for_chat = orig_fn

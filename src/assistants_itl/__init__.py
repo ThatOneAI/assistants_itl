@@ -9,7 +9,7 @@ import requests
 
 from itllib import ResourceController
 
-from .hfa_module import HFAssistantConfig, HFAssistant
+from .hfa_module import HFAssistantConfig, HFAssistant, TaskLog
 from .globals import *
 
 
@@ -19,31 +19,6 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", None)
 @prompts.register(itl, CLUSTER, "assistants.thatone.ai", "v1", "Prompt")
 class Prompt(BaseModel):
     prompt: str
-
-
-@tasklogs.register(itl, CLUSTER, "assistants.thatone.ai", "v1", "TaskLog")
-class TaskLog(BaseModel):
-    prompt: str
-    tools: dict[str, str] = {}
-    steps: str = ""
-    code: str
-
-
-@assistants.register(itl, CLUSTER, "assistants.thatone.ai", "v1", "HFAssistant")
-class HFAController(ResourceController):
-    def create_resource(self, config):
-        if "spec" not in config:
-            raise ValueError("Config is missing required key: spec")
-        return HFAssistant(HFAssistantConfig(**config["spec"]))
-
-    def update_resource(self, resource: HFAssistant, config):
-        if "spec" not in config:
-            raise ValueError("Config is missing required key: spec")
-        resource.configure(HFAssistantConfig(**config["spec"]))
-
-    def delete_resource(self, resource):
-        print("You'll need to restart the script to complete deletion of an assistant")
-        return super().delete_resource(resource)
 
 
 @tools.register(itl, CLUSTER, "tools.thatone.ai", "v1", "SendTool")
@@ -58,37 +33,43 @@ class SendTool(BaseModel):
     def __call__(self, *args, **kwargs):
         global itl
 
-        if args and kwargs:
-            raise ValueError(
-                "SendTool can only be called with args or kwargs, not both"
-            )
+        try:
+            if args and kwargs:
+                raise ValueError(
+                    "SendTool can only be called with args or kwargs, not both"
+                )
 
-        if self.format:
-            if args:
-                raise ValueError("SendTool with 'format' must use kwargs")
+            if self.format:
+                if args:
+                    raise ValueError("SendTool with 'format' must use kwargs")
 
-            if isinstance(self.format, str):
-                message = Template(self.format).substitute(**kwargs)
-            elif isinstance(self.format, dict):
-                message = {
-                    k: Template(v).substitute(**kwargs) for k, v in self.format.items()
-                }
-            elif isinstance(self.format, list):
-                message = [Template(v).substitute(**kwargs) for v in self.format]
-        elif self.join:
-            if kwargs:
-                raise ValueError("SendTool with 'join' must use args, not kwargs")
-            message = self.join.join(str(x) for x in args)
-        else:
-            message = args or kwargs
+                if isinstance(self.format, str):
+                    message = Template(self.format).substitute(**kwargs)
+                elif isinstance(self.format, dict):
+                    message = {
+                        k: Template(v).substitute(**kwargs)
+                        for k, v in self.format.items()
+                    }
+                elif isinstance(self.format, list):
+                    message = [Template(v).substitute(**kwargs) for v in self.format]
+            elif self.join:
+                if kwargs:
+                    raise ValueError("SendTool with 'join' must use args, not kwargs")
+                message = self.join.join(str(x) for x in args)
+            else:
+                message = args or kwargs
 
-        if self.print:
-            print(message)
+            if self.print:
+                print(message)
 
-        if self.synchronous:
-            itl.stream_send_sync(self.sendUrl, message)
-        else:
-            asyncio.create_task(itl.stream_send(self.sendUrl, message))
+            if self.synchronous:
+                itl.stream_send_sync(self.sendUrl, message)
+            else:
+                itl.stream_send(self.sendUrl, message)
+
+            return message
+        except Exception as e:
+            print("Error in SendTool:", e)
 
 
 @tools.register(itl, CLUSTER, "tools.thatone.ai", "v1", "RestApiTool")
