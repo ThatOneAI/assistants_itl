@@ -101,7 +101,6 @@ class HFAssistant:
         # TODO: Tasks coming in from the stream should append to the history, tasks
         # coming in from the TaskLog controller should not
 
-        print("Incoming message:", message)
         self.agent.prepare_for_new_chat()
 
         if self.agent.cached_tools:
@@ -112,9 +111,6 @@ class HFAssistant:
             else:
                 print(f"Missing tool: {reference}")
         self.agent.chat_history = self._assemble_history()
-
-        print("history:", self.agent.chat_history)
-        print("message:", message)
 
         tasklog = None
 
@@ -231,31 +227,24 @@ def _check_filter(message, filter):
 
     if isinstance(message, str):
         if not isinstance(filter, str):
-            print("message is a string, so filter should be too")
             return False
         result = re.match(filter, message) != None
-        if not result:
-            print("failed regex match")
         return result
 
     if not isinstance(message, dict):
-        print("message is not a string so it should be a dict")
         return False
 
     if isinstance(filter, list):
         for key in filter:
             if key not in message:
-                print(key, "not in message")
                 return False
         return True
 
     if not isinstance(filter, dict):
-        print("filter should be a list or dict")
         return False
 
     for key, value in filter.items():
         if key not in message:
-            print(key, "not in message")
             return False
         if not _check_filter(message[key], value):
             return False
@@ -288,7 +277,6 @@ def _capture_response(callback) -> Generator[None, None, None]:
 
     def _hijack_clean_code_for_chat(*args, **kwargs):
         nonlocal callback
-        print("response:", args, kwargs)
         explanation, code = orig_fn(*args, **kwargs)
         callback(explanation, code)
         return explanation, code
