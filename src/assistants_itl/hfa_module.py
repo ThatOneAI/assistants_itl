@@ -1,15 +1,20 @@
 from contextlib import contextmanager
 import os
-from typing import Generator
+import re
+from string import Template
+from typing import Generator, Optional, Union
 from pydantic import BaseModel
 import random
 from uuid import uuid1
 from time import time
+import asyncio
 
 from transformers.tools import Tool, OpenAiAgent, agents
 from itllib import Itl, ResourceController
+import yaml
 
 from .globals import *
+from .utils import ConfigTemplate
 
 NODE_ID = f"{int(time()*1000)}-{random.randint(0, 1000000000000)}"
 SEQUENCE = 0
@@ -32,26 +37,31 @@ class ToolWrapper(Tool):
 
 class HFAssistantConfig(BaseModel):
     codeModel: str
-    stream: str
-    mission: str
+    streams: list[str]
+    header: str
     tools: dict[str, str]
     examples: list[str]
 
 
-@tasklogs.register(itl, CLUSTER, "assistants.thatone.ai", "v1", "TaskLog")
 class TaskLog(BaseModel):
     prompt: str
     tools: dict[str, str] = {}
-    steps: str = ""
-    code: str
+    steps: Optional[str] = None
+    code: Optional[str] = None
+
+
+class Stream(BaseModel):
+    connectUrl: str
+    incomingFormat: str = None
+    incomingFilter: Union[str, list, dict] = None
 
 
 class HFAssistant:
     def __init__(self, config: HFAssistantConfig):
         global tools, prompts, tasklogs
 
-        self.stream = config.stream
-        self.mission = config.mission
+        self.header = ConfigTemplate(config.header)
+        self.streams = config.streams
         self.tools = config.tools
         self.examples = config.examples
 
@@ -60,44 +70,67 @@ class HFAssistant:
         self.available_prompts = prompts
         self.available_examples = tasklogs
 
-        itl.ondata(self.stream)(self._handle_messages)
+        # TODO: expose streams as tools
+
+    async def connect(self):
+        tasks = []
+
+        for stream_config_path in self.streams:
+            tasks.append(itl.resource_read(CLUSTER, *stream_config_path.split("/")))
+
+        results = await asyncio.gather(*tasks)
+        for i, stream_config_json in enumerate(results):
+            if stream_config_json == None:
+                raise ValueError("Missing stream config for", self.streams[i])
+            if "spec" not in stream_config_json:
+                raise ValueError("Missing spec in stream config for", self.streams[i])
+
+            stream_config = Stream(**stream_config_json["spec"])
+            self._handle_messages(stream_config)
 
     def configure(self, config: HFAssistantConfig):
-        if self.stream != config.stream:
-            raise ValueError("Cannot change stream after initialization")
+        if self.streams != config.streams:
+            raise ValueError("Cannot change streams after initialization")
 
-        self.mission = config.mission
         self.tools = config.tools
         self.examples = config.examples
-
-    def run(self, message: str):
-        self.agent.prepare_for_new_chat()
-        return self.chat(message)
+        self.header = ConfigTemplate(config.header)
+        self.agent = _create_agent(config.codeModel)
 
     def chat(self, message: str):
+        # TODO: Tasks coming in from the stream should append to the history, tasks
+        # coming in from the TaskLog controller should not
+
         print("Incoming message:", message)
+        self.agent.prepare_for_new_chat()
+
         if self.agent.cached_tools:
             self.agent.cached_tools.clear()
         for name, reference in self.tools.items():
             if reference in self.available_tools:
                 self.agent.toolbox[name] = ToolWrapper(self.available_tools[reference])
-        tools = {name: tool.description for name, tool in self.agent.toolbox.items()}
-        self.agent.chat_history = self._assemble_prompt(tools)
+            else:
+                print(f"Missing tool: {reference}")
+        self.agent.chat_history = self._assemble_history()
 
-        print("=== Result ===")
-        with _save_response() as response:
-            result = self.agent.chat(message)
+        print("history:", self.agent.chat_history)
+        print("message:", message)
 
-        code = response.code
-        explanation = response.explanation
+        tasklog = None
 
-        print("explanation:", explanation)
-        print("code:", code)
-        print("result:", result)
+        def store_response(explanation, code):
+            nonlocal tasklog
+            tasklog = TaskLog(
+                prompt=message, tools=self.tools, steps=explanation, code=code
+            )
 
-        tasklog = TaskLog(prompt=message, tools=tools, steps=explanation, code=code)
+        with _capture_response(store_response) as response:
+            self.agent.chat(message)
 
-        return result, tasklog
+        return tasklog
+
+    def _assemble_header(self):
+        return self.header.substitute()
 
     def _assemble_tool_description(self, tools):
         tool_lines = []
@@ -106,25 +139,28 @@ class HFAssistant:
         tool_description = "\n".join(tool_lines)
         return f"Tools:\n{tool_description}"
 
-    def _assemble_task_log(self, tasklog, tools={}):
+    def _assemble_task_log(self, tasklog, previous_tools={}):
         parts = []
 
-        if tools:
-            parts.append(self._assemble_tool_description(tools))
+        if previous_tools != tasklog.tools:
+            parts.append(self._assemble_tool_description(tasklog.tools))
             parts.append("=====")
 
-        parts.append(f"Human: {tasklog.prompt}")
+        parts.append(f"{tasklog.prompt}")
         parts.append(f"Assistant: {tasklog.steps}")
         parts.append(f"```python\n{tasklog.code}\n```")
 
         return "\n\n".join(parts)
 
-    def _assemble_prompt(self, current_tools):
+    def _assemble_history(self):
+        current_tools = {
+            name: tool.description for name, tool in self.agent.toolbox.items()
+        }
         tasks = []
 
-        mission = self.available_prompts.get(self.mission, None)
-        if mission:
-            tasks.append(mission.prompt)
+        header = self._assemble_header()
+        if header:
+            tasks.append(header)
 
         previous_tools = {}
 
@@ -134,87 +170,97 @@ class HFAssistant:
                 continue
 
             task = self.available_examples[task_name]
-            if previous_tools != task.tools:
-                tools = task.tools
-                previous_tools = tools
-            else:
-                tools = {}
-            tasks.append(self._assemble_task_log(task, tools))
+            tasks.append(self._assemble_task_log(task, previous_tools))
+            previous_tools = task.tools
 
         if current_tools != previous_tools:
             tasks.append(self._assemble_tool_description(current_tools))
 
         return "\n\n".join(tasks) + "\n"
 
-    async def _handle_messages(self, message):
-        if not isinstance(message, str):
-            print(f"Invalid message type: {type(message)}")
-            return
+    def _handle_messages(self, stream_config):
+        incoming_template = ConfigTemplate(stream_config.incomingFormat or "${message}")
+        incoming_filter = stream_config.incomingFilter
 
-        if message.startswith(">"):
-            return None
+        @itl.ondata(stream_config.connectUrl)
+        async def ondata(*args, **kwargs):
+            if args and not kwargs:
+                if len(args) != 1:
+                    return
+                message = args[0]
+            elif kwargs and not args:
+                message = kwargs
+            else:
+                return
 
-        if message.startswith("+"):
-            mode = "chat"
-            message = message[1:]
-        else:
-            mode = "run"
+            if not _check_filter(message, incoming_filter):
+                return None
 
-        if not isinstance(message, str):
-            print(f"Invalid message type: {type(message)}")
-            return
+            if not isinstance(message, dict):
+                message = {"message": message}
 
-        message = message.strip()
-        if len(message) == 0:
-            print("Rejecting empty message")
-            return
+            incoming = incoming_template.substitute(**message)
+            tasklog = self.chat(incoming)
 
-        if mode == "run":
-            result, tasklog = self.run(message)
-        elif mode == "chat":
-            result, tasklog = self.chat(message)
-        else:
-            print(f"Invalid mode: {mode}. Expected 'chat' or 'run'")
-            return
+            tasklog_config = {
+                "apiVersion": "assistants.thatone.ai/v1",
+                "kind": "TaskLog",
+                "metadata": {"name": _create_task_id()},
+                "spec": tasklog.model_dump(),
+            }
 
-        tasklog_config = {
-            "apiVersion": "assistants.thatone.ai/v1",
-            "kind": "TaskLog",
-            "metadata": {"name": _create_task_id()},
-            "spec": tasklog.model_dump(),
-        }
+            # Push the log to the cluster
+            await itl.resource_create(CLUSTER, tasklog_config, attach_prefix=True)
 
-        # Push the log to the cluster
-        await itl.resource_create(CLUSTER, tasklog_config, attach_prefix=True)
+            # Add the log to the list of known tasklogs
+            tasklog_name = itl.attach_cluster_prefix(
+                CLUSTER, tasklog_config["metadata"]["name"]
+            )
+            tasklog_id = f"assistants.thatone.ai/v1/TaskLog/{tasklog_name}"
+            tasklogs[tasklog_id] = tasklog
 
-        # Add the log to the list of known tasklogs
-        tasklog_name = itl.attach_cluster_prefix(
-            CLUSTER, tasklog_config["metadata"]["name"]
-        )
-        tasklog_id = f"assistants.thatone.ai/v1/TaskLog/{tasklog_name}"
-        tasklogs[tasklog_id] = tasklog
+            # Add the log to the history
+            self.examples.append(tasklog_id)
 
-        # Add the log to the history
-        self.examples.append(tasklog_id)
-
-        print("Done processing message")
+        return ondata
 
 
-@assistants.register(itl, CLUSTER, "assistants.thatone.ai", "v1", "HFAssistant")
-class HFAController(ResourceController):
-    def create_resource(self, config):
-        if "spec" not in config:
-            raise ValueError("Config is missing required key: spec")
-        return HFAssistant(HFAssistantConfig(**config["spec"]))
+def _check_filter(message, filter):
+    if filter == None:
+        return True
 
-    def update_resource(self, resource: HFAssistant, config):
-        if "spec" not in config:
-            raise ValueError("Config is missing required key: spec")
-        resource.configure(HFAssistantConfig(**config["spec"]))
+    if isinstance(message, str):
+        if not isinstance(filter, str):
+            print("message is a string, so filter should be too")
+            return False
+        result = re.match(filter, message) != None
+        if not result:
+            print("failed regex match")
+        return result
 
-    def delete_resource(self, resource):
-        print("You'll need to restart the script to complete deletion of an assistant")
-        return super().delete_resource(resource)
+    if not isinstance(message, dict):
+        print("message is not a string so it should be a dict")
+        return False
+
+    if isinstance(filter, list):
+        for key in filter:
+            if key not in message:
+                print(key, "not in message")
+                return False
+        return True
+
+    if not isinstance(filter, dict):
+        print("filter should be a list or dict")
+        return False
+
+    for key, value in filter.items():
+        if key not in message:
+            print(key, "not in message")
+            return False
+        if not _check_filter(message[key], value):
+            return False
+
+    return True
 
 
 @contextmanager
@@ -236,25 +282,19 @@ def _create_agent(code_model):
         return result
 
 
-class _HFAgentResponse:
-    explanation: str
-    code: str
-
-
 @contextmanager
-def _save_response() -> Generator[_HFAgentResponse, None, None]:
+def _capture_response(callback) -> Generator[None, None, None]:
     orig_fn = agents.clean_code_for_chat
-    result = _HFAgentResponse()
 
     def _hijack_clean_code_for_chat(*args, **kwargs):
-        nonlocal result
+        nonlocal callback
+        print("response:", args, kwargs)
         explanation, code = orig_fn(*args, **kwargs)
-        result.explanation = explanation or ""
-        result.code = code or ""
-        return result.explanation, result.code
+        callback(explanation, code)
+        return explanation, code
 
     try:
         agents.clean_code_for_chat = _hijack_clean_code_for_chat
-        yield result
+        yield
     finally:
         agents.clean_code_for_chat = orig_fn

@@ -1,7 +1,10 @@
 import asyncio
 
-# All the actual work is done by __init__.py. We just need to wait and let it does
-# its thing.
+import hfa_itls
+import tool_itls
+
+# All the actual work is done by hfa_itls.py and tool_itls. We just need to wait and
+# let them do their thing.
 
 
 async def main():
