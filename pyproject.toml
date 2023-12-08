@@ -17,7 +17,7 @@ requires-python = ">=3.7"
 dependencies = [
     "pyyaml",
     "openai",
-    "transformers",
+    "transformers@git+https://github.com/huggingface/transformers",
     "pydantic",
     "itllib@git+https://github.com/ThatOneAI/itllib",
     "itlmon@git+https://github.com/ThatOneAI/itlmon"
