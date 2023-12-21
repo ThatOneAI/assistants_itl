@@ -41,4 +41,21 @@ class Config(ResourceController):
         return config["spec"]
 
 
+class SecretBasicAuth(BaseModel):
+    endpoint: str
+    username: str
+    password: str
+
+
+@loops.register(itl, CLUSTER, "itllib", "v1", "LoopSecret")
+class LoopSecret(BaseModel):
+    loopName: str
+    authenticationType: str
+    secretBasicAuth: SecretBasicAuth
+    protocols: list[str]
+
+    def get_endpoint(self):
+        return f"{self.secretBasicAuth.endpoint}/loop/{self.loopName}"
+
+
 streams.register(itl, CLUSTER, "assistants.thatone.ai", "v1", "Stream")(Stream)

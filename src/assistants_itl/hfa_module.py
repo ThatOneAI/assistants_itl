@@ -51,9 +51,29 @@ class TaskLog(BaseModel):
 
 
 class Stream(BaseModel):
-    connectUrl: str
+    loopSecret: str
+    streamName: str
+    groupName: str = None
     incomingFormat: str = None
     incomingFilter: Union[str, list, dict] = None
+
+    def get_connect_url(self):
+        loop = loops.get(self.loopSecret)
+        base_url = f"wss://{loop.get_endpoint()}/connect/{self.streamName}"
+
+        if self.groupName:
+            base_url += f"/{self.groupName}"
+        else:
+            return base_url
+
+    def get_send_url(self):
+        loop = loops.get(self.loopSecret)
+        base_url = f"https://{loop.get_endpoint()}/send/{self.streamName}"
+
+        if self.groupName:
+            base_url += f"/{self.groupName}"
+        else:
+            return base_url
 
 
 class HFAssistant:
@@ -101,6 +121,7 @@ class HFAssistant:
         # TODO: Tasks coming in from the stream should append to the history, tasks
         # coming in from the TaskLog controller should not
 
+        print("Generating response for:", message)
         self.agent.prepare_for_new_chat()
 
         if self.agent.cached_tools:
@@ -178,7 +199,7 @@ class HFAssistant:
         incoming_template = ConfigTemplate(stream_config.incomingFormat or "${message}")
         incoming_filter = stream_config.incomingFilter
 
-        @itl.ondata(stream_config.connectUrl)
+        @itl.ondata(stream_config.get_connect_url())
         async def ondata(*args, **kwargs):
             if args and not kwargs:
                 if len(args) != 1:

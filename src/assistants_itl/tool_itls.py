@@ -32,12 +32,28 @@ def format_message(format, kwargs):
 @tools.register(itl, CLUSTER, "tools.thatone.ai", "v1", "SendTool")
 class SendTool(BaseModel):
     description: str
+    loopSecret: str = None
+    streamName: str = None
     sendUrl: str = None
     stream: str = None
     format: Union[str, dict, list] = None
     join: str = None
     print: bool = False
     synchronous: bool = False
+
+    def get_send_url(self):
+        if self.sendUrl:
+            return self.sendUrl
+        elif self.stream:
+            stream = streams[self.stream]
+            return stream.get_send_url()
+        elif self.loopSecret and self.streamName:
+            loop = loops[self.loopSecret]
+            return f"https://{loop.get_endpoint()}/send/{self.streamName}"
+        else:
+            raise ValueError(
+                "SendTool must have either: (*) 'sendUrl', (*) 'stream', or (*) 'loopSecret' and 'streamName'"
+            )
 
     def __call__(self, *args, **kwargs):
         global itl
@@ -63,10 +79,12 @@ class SendTool(BaseModel):
             if self.print:
                 print(message)
 
+            sendUrl = self.get_send_url()
+
             if self.synchronous:
-                itl.stream_send_sync(self.sendUrl, message)
+                itl.stream_send_sync(sendUrl, message)
             else:
-                itl.stream_send(self.sendUrl, message)
+                itl.stream_send(sendUrl, message)
 
             return message
         except Exception as e:
